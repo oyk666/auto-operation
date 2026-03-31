@@ -3,6 +3,7 @@ from CTkMessagebox import CTkMessagebox
 import threading
 import tkinter as tk
 import re
+import csv
 from typing import List, Dict, Any, Optional
 from automation_engine import AutomationEngine, ActionType
 from supabase_client import SupabaseManager
@@ -191,6 +192,10 @@ class ActionListFrame(ctk.CTkFrame):
         elif action_type == "type":
             text = config.get('text', '')[:50]
             return f"Type: {text}..."
+        elif action_type == "key":
+            key = config.get('key', 'enter')
+            presses = config.get('presses', 1)
+            return f"Press key: {key} x{presses}"
         elif action_type == "wait":
             return f"Wait {config.get('duration', 1)}s"
         elif action_type == "screenshot":
@@ -227,6 +232,18 @@ class ActionListFrame(ctk.CTkFrame):
 
 class ActionBuilder(ctk.CTkToplevel):
     """Dialog for building actions"""
+    VALID_KEY_NAMES = {
+        "enter", "tab", "esc", "escape", "space", "backspace", "delete", "del",
+        "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+        "insert", "shift", "ctrl", "alt", "win", "command", "option",
+        "capslock", "numlock", "scrolllock", "pause", "printscreen",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+    }
+    ALL_KEYS = sorted(
+        VALID_KEY_NAMES
+        .union({chr(i) for i in range(ord("a"), ord("z") + 1)})
+        .union({str(i) for i in range(10)})
+    )
 
     def __init__(self, parent, action_list_frame: ActionListFrame, edit_action=None, edit_index=None):
         super().__init__(parent)
@@ -253,7 +270,7 @@ class ActionBuilder(ctk.CTkToplevel):
 
         self.action_type = ctk.CTkComboBox(
             type_frame,
-            values=["click", "type", "wait", "screenshot"],
+            values=["click", "type", "key", "wait", "screenshot"],
             command=self._on_type_changed,
             state="readonly"
         )
@@ -311,10 +328,190 @@ class ActionBuilder(ctk.CTkToplevel):
             self._build_click_config()
         elif value == "type":
             self._build_type_config()
+        elif value == "key":
+            self._build_key_config()
         elif value == "wait":
             self._build_wait_config()
         elif value == "screenshot":
             self._build_screenshot_config()
+
+    def _build_key_config(self):
+        """Build keyboard action config"""
+        label = ctk.CTkLabel(
+            self.config_frame,
+            text="Keyboard Key / Shortcut",
+            font=("Arial", 12, "bold")
+        )
+        label.pack(anchor="w", pady=(0, 10))
+
+        info = ctk.CTkLabel(
+            self.config_frame,
+            text="Use dropdown or input key, then click Add. Supports ctrl+c, alt+f4",
+            text_color=("gray50", "gray70"),
+            font=("Arial", 9)
+        )
+        info.pack(anchor="w", pady=(0, 8))
+
+        key_row = ctk.CTkFrame(self.config_frame)
+        key_row.pack(fill="x", pady=5)
+        ctk.CTkLabel(key_row, text="Key:", width=70).pack(side="left")
+        self.key_input = ctk.CTkComboBox(
+            key_row,
+            values=self.ALL_KEYS,
+            width=220,
+            state="normal"
+        )
+        self.key_input.pack(side="left", padx=6)
+        self.key_input.set("enter")
+        self.key_input.bind("<KeyRelease>", self._on_key_input_changed)
+        self.key_input.bind("<Return>", self._on_key_input_enter)
+        self.key_input.bind("<FocusIn>", self._on_key_input_focus_in)
+        self.key_input.bind("<Escape>", self._on_key_input_escape)
+
+        add_btn = ctk.CTkButton(key_row, text="+ Add", width=70, command=self._add_key_token)
+        add_btn.pack(side="left", padx=4)
+        remove_btn = ctk.CTkButton(key_row, text="← Undo", width=70, command=self._remove_last_key_token)
+        remove_btn.pack(side="left", padx=4)
+
+        # Search dropdown suggestions
+        self.key_suggestion_frame = ctk.CTkFrame(self.config_frame)
+        self.key_suggestion_list = tk.Listbox(self.key_suggestion_frame, height=6)
+        self.key_suggestion_list.pack(fill="both", expand=True)
+        self.key_suggestion_list.bind("<<ListboxSelect>>", self._on_key_suggestion_select)
+        self.key_suggestion_list.bind("<Return>", self._on_key_suggestion_enter)
+        self.key_suggestion_list.bind("<ButtonRelease-1>", self._on_key_suggestion_click)
+        self.key_suggestion_visible = False
+
+        preview_row = ctk.CTkFrame(self.config_frame)
+        preview_row.pack(fill="x", pady=5)
+        ctk.CTkLabel(preview_row, text="Combo:", width=70).pack(side="left")
+        self.key_preview = ctk.CTkEntry(preview_row, width=330)
+        self.key_preview.pack(side="left", padx=6)
+
+        count_row = ctk.CTkFrame(self.config_frame)
+        count_row.pack(fill="x", pady=5)
+        ctk.CTkLabel(count_row, text="Presses:", width=70).pack(side="left")
+        self.key_presses = ctk.CTkEntry(count_row, width=100)
+        self.key_presses.pack(side="left", padx=6)
+        self.key_presses.insert(0, "1")
+
+        ctk.CTkLabel(count_row, text="Interval(s):", width=90).pack(side="left", padx=(10, 0))
+        self.key_interval = ctk.CTkEntry(count_row, width=100)
+        self.key_interval.pack(side="left", padx=6)
+        self.key_interval.insert(0, "0.05")
+
+        self.key_tokens: List[str] = []
+
+        if self.edit_action and self.edit_action['action_type'] == 'key':
+            existing_key = str(self.edit_action['config'].get('key', 'enter')).strip()
+            if existing_key:
+                self.key_tokens = [token.strip() for token in existing_key.split("+") if token.strip()]
+                if not self.key_tokens:
+                    self.key_tokens = [existing_key]
+            self._refresh_key_preview()
+            self.key_presses.delete(0, "end")
+            self.key_presses.insert(0, str(self.edit_action['config'].get('presses', 1)))
+            self.key_interval.delete(0, "end")
+            self.key_interval.insert(0, str(self.edit_action['config'].get('interval', 0.05)))
+        else:
+            self._refresh_key_preview()
+
+    def _normalize_key_token(self, raw: str) -> str:
+        return raw.strip().lower()
+
+    def _is_valid_key_token(self, token: str) -> bool:
+        if not token:
+            return False
+        if len(token) == 1 and token.isprintable():
+            return True
+        return token in self.VALID_KEY_NAMES
+
+    def _refresh_key_preview(self):
+        combo = "+".join(self.key_tokens)
+        self.key_preview.delete(0, "end")
+        self.key_preview.insert(0, combo)
+
+    def _on_key_input_changed(self, event=None):
+        typed = self._normalize_key_token(self.key_input.get())
+        if not typed:
+            filtered = self.ALL_KEYS
+        else:
+            filtered = [key for key in self.ALL_KEYS if typed in key]
+            if not filtered:
+                filtered = []
+
+        self.key_input.configure(values=(filtered[:200] if filtered else self.ALL_KEYS[:200]))
+        self.key_input.set(typed)
+        self._show_key_suggestions(filtered)
+
+    def _on_key_input_focus_in(self, event=None):
+        typed = self._normalize_key_token(self.key_input.get())
+        filtered = [key for key in self.ALL_KEYS if typed in key] if typed else self.ALL_KEYS
+        self._show_key_suggestions(filtered)
+
+    def _on_key_input_escape(self, event=None):
+        self._hide_key_suggestions()
+        return "break"
+
+    def _show_key_suggestions(self, options: List[str]):
+        self.key_suggestion_list.delete(0, "end")
+        for key in options[:80]:
+            self.key_suggestion_list.insert("end", key)
+
+        if options:
+            if not self.key_suggestion_visible:
+                self.key_suggestion_frame.pack(fill="x", padx=4, pady=(0, 6), after=self.key_input.master)
+                self.key_suggestion_visible = True
+            self.key_suggestion_list.selection_clear(0, "end")
+            self.key_suggestion_list.selection_set(0)
+        else:
+            self._hide_key_suggestions()
+
+    def _hide_key_suggestions(self):
+        if self.key_suggestion_visible:
+            self.key_suggestion_frame.pack_forget()
+            self.key_suggestion_visible = False
+
+    def _on_key_suggestion_select(self, event=None):
+        selected = self.key_suggestion_list.curselection()
+        if not selected:
+            return
+        value = self.key_suggestion_list.get(selected[0])
+        self.key_input.set(value)
+
+    def _on_key_suggestion_click(self, event=None):
+        self._on_key_suggestion_select()
+        self.key_input.focus_set()
+        self._hide_key_suggestions()
+
+    def _on_key_suggestion_enter(self, event=None):
+        self._on_key_suggestion_select()
+        self.key_input.focus_set()
+        self._hide_key_suggestions()
+        return "break"
+
+    def _on_key_input_enter(self, event=None):
+        self._add_key_token()
+        return "break"
+
+    def _add_key_token(self):
+        token = self._normalize_key_token(self.key_input.get())
+        if not self._is_valid_key_token(token):
+            CTkMessagebox(
+                title="Invalid key",
+                message=f"Unsupported key: {token or '(empty)'}",
+                icon="cancel"
+            )
+            return
+        self.key_tokens.append(token)
+        self._refresh_key_preview()
+        self.key_input.set("")
+        self._hide_key_suggestions()
+
+    def _remove_last_key_token(self):
+        if self.key_tokens:
+            self.key_tokens.pop()
+            self._refresh_key_preview()
 
     def _build_click_config(self):
         """Build click action config"""
@@ -363,7 +560,7 @@ class ActionBuilder(ctk.CTkToplevel):
 
         info = ctk.CTkLabel(
             self.config_frame,
-            text="Use {item} placeholder for batch search terms",
+            text="Use placeholders like {item}, {name}, {phone} from batch fields",
             text_color=("gray50", "gray70"),
             font=("Arial", 9)
         )
@@ -578,6 +775,21 @@ class ActionBuilder(ctk.CTkToplevel):
                 config = {
                     "duration": float(self.wait_duration.get())
                 }
+            elif action_type == "key":
+                key_combo = self.key_preview.get().strip()
+                if not key_combo:
+                    token = self._normalize_key_token(self.key_input.get())
+                    if self._is_valid_key_token(token):
+                        self.key_tokens = [token]
+                        self._refresh_key_preview()
+                        key_combo = self.key_preview.get().strip()
+                if not key_combo:
+                    raise ValueError("Please add at least one valid key")
+                config = {
+                    "key": key_combo,
+                    "presses": int(self.key_presses.get()),
+                    "interval": float(self.key_interval.get())
+                }
             elif action_type == "screenshot":
                 config = {
                     "filename": self.screenshot_file.get()
@@ -738,7 +950,7 @@ class MainWindow(ctk.CTk):
 
         batch_info = ctk.CTkLabel(
             right_panel,
-            text="Enter search terms (one per line)",
+            text="Formats: one value/line, CSV header + rows, or key=value pairs",
             text_color=("gray50", "gray70"),
             font=("Arial", 10)
         )
@@ -1050,8 +1262,8 @@ class MainWindow(ctk.CTk):
             CTkMessagebox(title="Error", message="Please enter batch items", icon="cancel")
             return
 
-        items = self._parse_batch_items(items_text)
-        print(f"DEBUG: Parsed {len(items)} batch items")
+        batch_contexts = self._parse_batch_items(items_text)
+        print(f"DEBUG: Parsed {len(batch_contexts)} batch items")
         
         actions = self.action_list.get_actions()
         print(f"DEBUG: Got {len(actions)} actions")
@@ -1066,24 +1278,73 @@ class MainWindow(ctk.CTk):
         self.pause_btn.configure(state="normal")
         self.resume_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        self.status_label.configure(text=f"Executing {len(items)} items...")
+        self.status_label.configure(text=f"Executing {len(batch_contexts)} items...")
 
         # Run in thread
         thread = threading.Thread(
             target=self._batch_execution_thread,
-            args=(items, actions),
+            args=(batch_contexts, actions),
             daemon=True
         )
         thread.start()
 
-    def _parse_batch_items(self, items_text: str) -> List[str]:
-        """Parse batch input by line and common delimiters."""
-        parts = re.split(r"[\r\n,;]+", items_text)
-        return [part.strip() for part in parts if part.strip()]
+    def _parse_batch_items(self, items_text: str) -> List[Dict[str, str]]:
+        """Parse batch input into contexts for placeholder substitution."""
+        lines = [line.strip() for line in items_text.splitlines() if line.strip()]
+        if not lines:
+            return []
 
-    def _batch_execution_thread(self, items: List[str], actions: List[Dict[str, Any]]):
+        # Mode 1: key=value pairs per line, separated by comma/semicolon
+        if any("=" in line for line in lines):
+            contexts: List[Dict[str, str]] = []
+            for line in lines:
+                context: Dict[str, str] = {}
+                for pair in re.split(r"[;,]+", line):
+                    pair = pair.strip()
+                    if "=" not in pair:
+                        continue
+                    key, value = pair.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if key:
+                        context[key] = value
+                if context:
+                    if "item" not in context:
+                        context["item"] = next(iter(context.values()), "")
+                    contexts.append(context)
+            if contexts:
+                return contexts
+
+        # Mode 2: CSV with header on first line
+        try:
+            rows = list(csv.reader(lines))
+            if len(rows) >= 2 and len(rows[0]) >= 2:
+                headers = [h.strip() for h in rows[0]]
+                contexts = []
+                for row in rows[1:]:
+                    if not any(cell.strip() for cell in row):
+                        continue
+                    context = {}
+                    for i, header in enumerate(headers):
+                        if not header:
+                            continue
+                        context[header] = row[i].strip() if i < len(row) else ""
+                    if context:
+                        if "item" not in context:
+                            context["item"] = row[0].strip() if row else ""
+                        contexts.append(context)
+                if contexts:
+                    return contexts
+        except Exception:
+            pass
+
+        # Mode 3: default single field per value
+        parts = re.split(r"[\r\n,;]+", items_text)
+        return [{"item": part.strip()} for part in parts if part.strip()]
+
+    def _batch_execution_thread(self, batch_contexts: List[Dict[str, str]], actions: List[Dict[str, Any]]):
         """Execute batch in background thread"""
-        print(f"DEBUG: Thread started - {len(items)} items, {len(actions)} actions")
+        print(f"DEBUG: Thread started - {len(batch_contexts)} items, {len(actions)} actions")
         try:
             self.engine.load_actions(actions)
             self.engine.is_running = True  # Set engine running state
@@ -1092,23 +1353,24 @@ class MainWindow(ctk.CTk):
             success_count = 0
             error_count = 0
 
-            for idx, item in enumerate(items):
-                print(f"DEBUG: Processing item {idx + 1}/{len(items)}: {item}")
+            for idx, context in enumerate(batch_contexts):
+                item_label = context.get("item", "")
+                if not item_label:
+                    item_label = ", ".join([f"{k}={v}" for k, v in list(context.items())[:2]])
+                print(f"DEBUG: Processing item {idx + 1}/{len(batch_contexts)}: {item_label}")
                 if not self.engine.is_running:
                     print("DEBUG: Engine stopped")
                     break
 
-                context = {"item": item}
-
                 self.after(
                     0,
-                    lambda i=item, n=idx + 1, total=len(items): self.status_label.configure(
+                    lambda i=item_label, n=idx + 1, total=len(batch_contexts): self.status_label.configure(
                         text=f"Processing: {i} ({n}/{total})"
                     )
                 )
 
                 try:
-                    print(f"DEBUG: Executing workflow for '{item}'")
+                    print(f"DEBUG: Executing workflow for '{item_label}'")
                     result = self.engine.execute_workflow(context)
                     if result:
                         success_count += 1
@@ -1118,7 +1380,7 @@ class MainWindow(ctk.CTk):
                         print(f"DEBUG: Workflow returned False. Total errors: {error_count}")
                 except Exception as e:
                     error_count += 1
-                    print(f"ERROR: Error processing {item}: {str(e)}")
+                    print(f"ERROR: Error processing {item_label}: {str(e)}")
                     import traceback
                     traceback.print_exc()
 

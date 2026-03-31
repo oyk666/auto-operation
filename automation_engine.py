@@ -15,6 +15,7 @@ pyautogui.PAUSE = 0.1
 class ActionType(Enum):
     CLICK = "click"
     TYPE = "type"
+    KEY = "key"
     WAIT = "wait"
     SCREENSHOT = "screenshot"
 
@@ -92,6 +93,33 @@ class AutomationEngine:
         time.sleep(duration)
         logger.info(f"Waited {duration} seconds")
 
+    def _execute_key(self, config: Dict[str, Any], context: Dict[str, str]):
+        """Execute keyboard key/shortcut action"""
+        key_text = str(config.get('key', '')).strip()
+        if not key_text:
+            raise ValueError("Key action requires 'key' value")
+
+        # Support placeholders like {key_name} from batch context
+        for key, value in context.items():
+            key_text = key_text.replace(f"{{{key}}}", str(value))
+
+        press_count = int(config.get('presses', 1))
+        interval = float(config.get('interval', 0.05))
+        if press_count < 1:
+            raise ValueError("Key action presses must be >= 1")
+
+        keys = [k.strip().lower() for k in key_text.split("+") if k.strip()]
+        if not keys:
+            raise ValueError("Key action has invalid key string")
+
+        if len(keys) > 1:
+            for _ in range(press_count):
+                pyautogui.hotkey(*keys, interval=interval)
+            logger.info(f"Pressed hotkey: {' + '.join(keys)} x{press_count}")
+        else:
+            pyautogui.press(keys[0], presses=press_count, interval=interval)
+            logger.info(f"Pressed key: {keys[0]} x{press_count}")
+
     def _execute_screenshot(self, config: Dict[str, Any]):
         """Execute screenshot action"""
         filename = config.get('filename', f"screenshot_{int(time.time())}.png")
@@ -108,6 +136,8 @@ class AutomationEngine:
                 self._execute_click(action.config)
             elif action.action_type == ActionType.TYPE:
                 self._execute_type(action.config, context)
+            elif action.action_type == ActionType.KEY:
+                self._execute_key(action.config, context)
             elif action.action_type == ActionType.WAIT:
                 self._execute_wait(action.config)
             elif action.action_type == ActionType.SCREENSHOT:
