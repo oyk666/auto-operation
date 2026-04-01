@@ -57,6 +57,17 @@ python main.py
 # 3. Sign in and create your first operation!
 ```
 
+#### Build standalone executable (Windows, PyInstaller)
+
+Produces a single-file GUI app: `dist/AutomationTool.exe` (no console window). Requires the same Python environment as development.
+
+```bash
+pip install -r requirements.txt -r requirements-build.txt
+python -m PyInstaller --noconfirm automation_tool.spec
+```
+
+The executable is written to `dist/AutomationTool.exe`. Runtime data (e.g. `automation_data.json`) is created in the process working directory—typically the folder from which you launch the `.exe`.
+
 ### Web Dashboard
 
 ```bash

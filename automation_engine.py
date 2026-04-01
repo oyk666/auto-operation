@@ -1,4 +1,5 @@
 import pyautogui
+import pyperclip
 import time
 from typing import Dict, Any, List, Callable, Optional
 from dataclasses import dataclass
@@ -10,6 +11,45 @@ logger = logging.getLogger(__name__)
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.1
+
+
+def _type_unicode_aware(text: str, interval: float = 0.05) -> None:
+    """Send keystrokes for text. ASCII uses typewrite; other characters use clipboard paste.
+
+    PyAutoGUI typewrite only maps printable ASCII on Windows; CJK etc. are ignored silently.
+    """
+    def is_typewrite_char(c: str) -> bool:
+        return len(c) == 1 and 32 <= ord(c) <= 127
+
+    i = 0
+    n = len(text)
+    while i < n:
+        if is_typewrite_char(text[i]):
+            j = i + 1
+            while j < n and is_typewrite_char(text[j]):
+                j += 1
+            pyautogui.typewrite(text[i:j], interval=interval)
+            i = j
+        else:
+            j = i + 1
+            while j < n and not is_typewrite_char(text[j]):
+                j += 1
+            run = text[i:j]
+            try:
+                previous = pyperclip.paste()
+            except Exception:
+                previous = ""
+            try:
+                pyperclip.copy(run)
+                time.sleep(0.05)
+                pyautogui.hotkey("ctrl", "v")
+            finally:
+                try:
+                    pyperclip.copy(previous)
+                except Exception:
+                    pass
+            time.sleep(interval * max(1, len(run)))
+            i = j
 
 
 class ActionType(Enum):
@@ -80,8 +120,8 @@ class AutomationEngine:
         for key, value in context.items():
             text = text.replace(f"{{{key}}}", str(value))
 
-        interval = config.get('interval', 0.05)
-        pyautogui.typewrite(text, interval=interval)
+        interval = float(config.get('interval', 0.05))
+        _type_unicode_aware(text, interval=interval)
         logger.info(f"Typed: {text}")
 
     def _execute_wait(self, config: Dict[str, Any]):
